@@ -1,18 +1,21 @@
+import tkinter as tk
+from tkinter import ttk
+from tkinter import messagebox
 import sqlite3
 import datetime
+from functools import partial
+from calendar import month_name, monthrange
 
-# Nome do arquivo do banco de dados
+# --- LÓGICA DO BANCO DE DADOS (Backend) ---
+# Esta seção não mudou, mas está inclusa para garantir que você tenha o código completo.
 NOME_BANCO_DADOS = 'controle_financeiro.db'
 
 def conectar_bd():
-    """Conecta ao banco de dados SQLite e retorna a conexão e o cursor."""
     conn = sqlite3.connect(NOME_BANCO_DADOS)
     conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    return conn, cursor
+    return conn, conn.cursor()
 
 def inicializar_banco_de_dados():
-    """Cria a tabela de transações no banco de dados, se ela não existir."""
     conn, cursor = conectar_bd()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transacoes_tb (
@@ -27,399 +30,616 @@ def inicializar_banco_de_dados():
     conn.commit()
     conn.close()
 
-def _converter_linha_para_dicionario(linha_db):
-    """Converte uma linha do banco de dados (objeto Row) para um dicionário."""
-    if linha_db:
-        return dict(linha_db)
-    return None
+def buscar_transacoes_db(ano=None, mes=None):
+    conn, cursor = conectar_bd()
+    try:
+        query = "SELECT id, tipo, descricao, valor, categoria, data_registro FROM transacoes_tb"
+        params = []
+        conditions = []
+        if ano:
+            conditions.append("strftime('%Y', data_registro) = ?")
+            params.append(str(ano))
+        if mes:
+            mes_formatado = f"{int(mes):02d}"
+            conditions.append("strftime('%m', data_registro) = ?")
+            params.append(mes_formatado)
+        
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        query += " ORDER BY data_registro DESC, id DESC"
+        cursor.execute(query, params)
+        linhas_db = cursor.fetchall()
+        return [dict(linha) for linha in linhas_db]
+    except sqlite3.Error as e: raise e
+    finally: conn.close()
 
-def _buscar_transacao_por_id(id_transacao):
-    """Busca uma transação específica pelo seu ID."""
+def calcular_saldo_db(ano=None, mes=None):
+    total_ganhos, total_despesas = 0.0, 0.0
+    conn, cursor = conectar_bd()
+    try:
+        query = "SELECT tipo, valor FROM transacoes_tb"
+        params = []
+        conditions = []
+        if ano:
+            conditions.append("strftime('%Y', data_registro) = ?")
+            params.append(str(ano))
+        if mes:
+            mes_formatado = f"{int(mes):02d}"
+            conditions.append("strftime('%m', data_registro) = ?")
+            params.append(mes_formatado)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+            
+        cursor.execute(query, params)
+        for linha in cursor.fetchall():
+            transacao = dict(linha)
+            if transacao['tipo'] == 'ganho': total_ganhos += transacao['valor']
+            elif transacao['tipo'] == 'despesa': total_despesas += transacao['valor']
+        return total_ganhos, total_despesas, total_ganhos - total_despesas
+    except sqlite3.Error as e: raise e
+    finally: conn.close()
+
+def buscar_anos_disponiveis_db():
+    conn, cursor = conectar_bd()
+    try:
+        cursor.execute("SELECT DISTINCT strftime('%Y', data_registro) as ano FROM transacoes_tb ORDER BY ano DESC")
+        anos = [row['ano'] for row in cursor.fetchall() if row['ano'] is not None]
+        return anos
+    except sqlite3.Error as e: raise e
+    finally: conn.close()
+
+def adicionar_ganho_db(descricao, valor):
+    conn, cursor = conectar_bd()
+    try:
+        cursor.execute("INSERT INTO transacoes_tb (tipo, descricao, valor, categoria, data_registro) VALUES (?, ?, ?, ?, ?)",
+                       ('ganho', descricao, valor, None, datetime.datetime.now().isoformat()))
+        conn.commit(); return True
+    except sqlite3.Error as e: conn.rollback(); raise e
+    finally: conn.close()
+
+def adicionar_despesa_db(descricao, valor, categoria, data_registro_iso=None):
+    conn, cursor = conectar_bd()
+    if data_registro_iso is None: data_registro_iso = datetime.datetime.now().isoformat()
+    try:
+        cursor.execute("INSERT INTO transacoes_tb (tipo, descricao, valor, categoria, data_registro) VALUES (?, ?, ?, ?, ?)",
+                       ('despesa', descricao, valor, categoria, data_registro_iso))
+        conn.commit(); return True
+    except sqlite3.Error as e: conn.rollback(); raise e
+    finally: conn.close()
+
+def _buscar_transacao_por_id_db(id_transacao):
     conn, cursor = conectar_bd()
     try:
         cursor.execute("SELECT * FROM transacoes_tb WHERE id = ?", (id_transacao,))
         linha_db = cursor.fetchone()
-        return _converter_linha_para_dicionario(linha_db)
-    except sqlite3.Error as e:
-        print(f"Erro ao buscar transação por ID: {e}")
-        return None
-    finally:
-        conn.close()
+        return dict(linha_db) if linha_db else None
+    except sqlite3.Error as e: raise e
+    finally: conn.close()
 
-def _exibir_lista_formatada(lista_a_exibir, titulo):
-    print(f"\n--- {titulo} ---")
-    if not lista_a_exibir:
-        print("Nenhuma transação encontrada.")
-        return
-
-    print(f"{'ID':<5} {'Data':<12} {'Tipo':<10} {'Descrição':<25} {'Valor (R$)':<15} {'Categoria':<20}")
-    print("-" * 90)
-
-    for transacao_dict in lista_a_exibir:
-        valor_formatado = f"{transacao_dict['valor']:.2f}"
-        categoria_exibida = transacao_dict['categoria'] if transacao_dict['categoria'] is not None else "-"
-        # Tratamento para data_registro que pode ser string ou datetime dependendo da origem
-        if isinstance(transacao_dict['data_registro'], str):
-            data_obj = datetime.datetime.fromisoformat(transacao_dict['data_registro'])
-        else: # Assume que é um objeto datetime
-            data_obj = transacao_dict['data_registro']
-        data_formatada = data_obj.strftime('%d/%m/%Y')
-
-
-        print(f"{transacao_dict['id']:<5} {data_formatada:<12} {transacao_dict['tipo'].capitalize():<10} {transacao_dict['descricao']:<25} {valor_formatado:<15} {categoria_exibida:<20}")
-    print("-" * 90)
-
-def adicionar_ganho():
-    print("\n-- Adicionar Novo(s) Ganho(s) --")
-    while True:
-        descricao = input("Descrição do ganho (ex: Salário, Venda de item): ")
-        valor = 0.0
-        while True:
-            try:
-                valor_str = input("Valor do ganho (ex: 50.75): ")
-                valor = float(valor_str.replace(',', '.'))
-                if valor <= 0:
-                    print("O valor do ganho deve ser positivo. Tente novamente.")
-                else:
-                    break
-            except ValueError:
-                print("Valor inválido. Por favor, insira um número (ex: 50.75 ou 1200).")
-
-        conn, cursor = conectar_bd()
-        try:
-            cursor.execute('''
-                INSERT INTO transacoes_tb (tipo, descricao, valor, categoria)
-                VALUES (?, ?, ?, ?)
-            ''', ('ganho', descricao, valor, None))
-            conn.commit()
-            print(f"Ganho '{descricao}' no valor de R$ {valor:.2f} adicionado com sucesso!")
-        except sqlite3.Error as e:
-            print(f"Erro ao adicionar ganho ao banco de dados: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
-
-        continuar = input("Deseja adicionar outro ganho? (s/n): ").strip().lower()
-        if continuar != 's':
-            break
-
-def adicionar_despesa():
-    print("\n-- Adicionar Nova(s) Despesa(s) --")
-    while True:
-        descricao = input("Descrição da despesa (ex: Aluguel, Supermercado): ")
-        valor = 0.0
-        while True:
-            try:
-                valor_str = input("Valor da despesa (ex: 70.30): ")
-                valor = float(valor_str.replace(',', '.'))
-                if valor <= 0:
-                    print("O valor da despesa deve ser positivo. Tente novamente.")
-                else:
-                    break
-            except ValueError:
-                print("Valor inválido. Por favor, insira um número (ex: 70.30 ou 150).")
-        categoria = input("Categoria da despesa (ex: Moradia, Alimentação, Lazer): ")
-
-        conn, cursor = conectar_bd()
-        try:
-            cursor.execute('''
-                INSERT INTO transacoes_tb (tipo, descricao, valor, categoria)
-                VALUES (?, ?, ?, ?)
-            ''', ('despesa', descricao, valor, categoria))
-            conn.commit()
-            print(f"Despesa '{descricao}' ({categoria}) no valor de R$ {valor:.2f} adicionada com sucesso!")
-        except sqlite3.Error as e:
-            print(f"Erro ao adicionar despesa ao banco de dados: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
-
-        continuar = input("Deseja adicionar outra despesa? (s/n): ").strip().lower()
-        if continuar != 's':
-            break
-
-def listar_transacoes():
+def editar_transacao_db(id_transacao, descricao, valor, categoria):
     conn, cursor = conectar_bd()
     try:
-        cursor.execute("SELECT id, tipo, descricao, valor, categoria, data_registro FROM transacoes_tb ORDER BY data_registro DESC, id DESC")
-        linhas_db = cursor.fetchall()
-        transacoes_lista_dict = [_converter_linha_para_dicionario(linha) for linha in linhas_db]
-        _exibir_lista_formatada(transacoes_lista_dict, "Lista de Todas as Transações")
-    except sqlite3.Error as e:
-        print(f"Erro ao listar transações: {e}")
-    finally:
-        conn.close()
+        cursor.execute("UPDATE transacoes_tb SET descricao = ?, valor = ?, categoria = ? WHERE id = ?",
+                       (descricao, valor, categoria, id_transacao))
+        conn.commit(); return True
+    except sqlite3.Error as e: conn.rollback(); raise e
+    finally: conn.close()
 
-def ver_saldo():
-    print("\n--- Saldo Atual ---")
-    saldo = 0.0
-    total_ganhos = 0.0
-    total_despesas = 0.0
-
+def excluir_transacao_db(id_transacao):
     conn, cursor = conectar_bd()
     try:
-        cursor.execute("SELECT tipo, valor FROM transacoes_tb")
-        for linha in cursor.fetchall():
-            transacao_dict = _converter_linha_para_dicionario(linha)
-            if transacao_dict['tipo'] == 'ganho':
-                saldo += transacao_dict['valor']
-                total_ganhos += transacao_dict['valor']
-            elif transacao_dict['tipo'] == 'despesa':
-                saldo -= transacao_dict['valor']
-                total_despesas += transacao_dict['valor']
+        cursor.execute("DELETE FROM transacoes_tb WHERE id = ?", (id_transacao,))
+        conn.commit(); return cursor.rowcount > 0
+    except sqlite3.Error as e: conn.rollback(); raise e
+    finally: conn.close()
 
-        print(f"Total de Ganhos:   R$ {total_ganhos:.2f}")
-        print(f"Total de Despesas: R$ {total_despesas:.2f}")
-        print("-" * 30)
-        if saldo >= 0:
-            print(f"Saldo Disponível:  R$ {saldo:.2f}")
-        else:
-            print(f"Saldo Disponível: -R$ {abs(saldo):.2f} (Negativo)")
-        print("-" * 30)
-    except sqlite3.Error as e:
-        print(f"Erro ao calcular saldo: {e}")
-    finally:
-        conn.close()
 
-def filtrar_transacoes():
-    print("\n--- Filtrar Transações ---")
-    conn_check, cursor_check = conectar_bd()
-    cursor_check.execute("SELECT COUNT(*) FROM transacoes_tb")
-    count = cursor_check.fetchone()[0]
-    conn_check.close()
+class AppControleFinanceiro:
+    def __init__(self, root_window):
+        self.root = root_window
+        self.root.title("Controle Financeiro Pessoal")
+        self.root.geometry("1000x800")
 
-    if count == 0:
-        print("\nNenhuma transação registrada para filtrar.")
-        return
-
-    print("1. Ver apenas Ganhos")
-    print("2. Ver apenas Despesas")
-    print("0. Voltar ao Menu Principal")
-
-    while True:
-        escolha_filtro = input("Escolha o tipo de transação para filtrar: ")
-        sql_query = ""
-        titulo_lista = ""
-
-        if escolha_filtro == '1':
-            sql_query = "SELECT * FROM transacoes_tb WHERE tipo = 'ganho' ORDER BY data_registro DESC, id DESC"
-            titulo_lista = "Ganhos Registrados"
-        elif escolha_filtro == '2':
-            sql_query = "SELECT * FROM transacoes_tb WHERE tipo = 'despesa' ORDER BY data_registro DESC, id DESC"
-            titulo_lista = "Despesas Registradas"
-        elif escolha_filtro == '0':
-            return
-        else:
-            print("Opção de filtro inválida. Tente novamente.")
-            continue
-
-        conn, cursor = conectar_bd()
+        self.cor_fundo_principal = "#2e2e2e"
+        self.cor_fundo_secundario = "#3c3c3c"
+        self.cor_texto_principal = "#e0e0e0"
+        self.cor_texto_secundario = "#c0c0c0"
+        self.cor_selecao_treeview = "#555555"
+        self.cor_required_label = "#75aadb"
+        self.root.configure(bg=self.cor_fundo_principal)
+        style = ttk.Style(self.root)
         try:
-            cursor.execute(sql_query)
-            linhas_db = cursor.fetchall()
-            transacoes_lista_dict = [_converter_linha_para_dicionario(linha) for linha in linhas_db]
-            _exibir_lista_formatada(transacoes_lista_dict, titulo_lista)
-            break
-        except sqlite3.Error as e:
-            print(f"Erro ao filtrar transações: {e}")
-            break
-        finally:
-            conn.close()
+            if 'clam' in style.theme_names(): style.theme_use('clam')
+            elif 'alt' in style.theme_names(): style.theme_use('alt')
+        except Exception: pass
+        style.configure('.', background=self.cor_fundo_principal, foreground=self.cor_texto_principal)
+        style.configure('TFrame', background=self.cor_fundo_principal)
+        style.configure('TLabel', background=self.cor_fundo_principal, foreground=self.cor_texto_principal, font=('Arial', 10))
+        style.configure('Bold.TLabel', background=self.cor_fundo_principal, foreground=self.cor_texto_principal, font=('Arial', 10, 'bold'))
+        style.configure('Required.TLabel', background=self.cor_fundo_principal, foreground=self.cor_required_label)
+        style.configure('Status.TLabel', background=self.cor_fundo_principal, padding=5)
+        style.configure('TButton', background="#505050", foreground=self.cor_texto_principal, font=('Arial', 10), padding=5)
+        style.map('TButton', background=[('active', '#606060'), ('disabled', '#404040')], foreground=[('disabled', self.cor_texto_secundario)])
+        style.configure("Treeview", background=self.cor_fundo_secundario, foreground=self.cor_texto_principal, fieldbackground=self.cor_fundo_secundario, rowheight=25)
+        style.configure("Treeview.Heading", background="#4a4a4a", foreground=self.cor_texto_principal, font=('Arial', 10, 'bold'), padding=5)
+        style.map("Treeview", background=[('selected', self.cor_selecao_treeview)], foreground=[('selected', self.cor_texto_principal)])
+        style.map("Treeview.Heading", background=[('active', '#5a5a5a')])
+        style.configure('TEntry', fieldbackground=self.cor_fundo_secundario, foreground=self.cor_texto_principal, insertcolor=self.cor_texto_principal)
+        style.configure('Vertical.TScrollbar', background='#505050', troughcolor=self.cor_fundo_secundario, bordercolor=self.cor_fundo_principal, arrowcolor=self.cor_texto_principal)
+        style.map('Vertical.TScrollbar', background=[('active', '#606060')])
+        style.configure('TLabelframe', background=self.cor_fundo_principal, bordercolor=self.cor_texto_secundario, padding=(10, 5))
+        style.configure('TLabelframe.Label', background=self.cor_fundo_principal, foreground=self.cor_texto_principal, font=('Arial', 10, 'bold'))
+        style.configure('TCombobox', fieldbackground=self.cor_fundo_secundario, background=self.cor_fundo_secundario, foreground=self.cor_texto_principal, selectbackground=self.cor_selecao_treeview, selectforeground=self.cor_texto_principal, arrowcolor=self.cor_texto_principal)
+        style.configure('TCheckbutton', background=self.cor_fundo_principal, foreground=self.cor_texto_principal)
+        style.map('TCheckbutton', background=[('active', self.cor_fundo_secundario)], indicatorcolor=[('selected', self.cor_required_label), ('!selected', self.cor_texto_secundario)])
+        self.root.option_add('*TCombobox*Listbox.background', self.cor_fundo_secundario)
+        self.root.option_add('*TCombobox*Listbox.foreground', self.cor_texto_principal)
+        self.root.option_add('*TCombobox*Listbox.selectBackground', self.cor_selecao_treeview)
+        self.root.option_add('*TCombobox*Listbox.selectForeground', self.cor_texto_principal)
 
-def editar_transacao():
-    print("\n--- Editar Transação ---")
-    listar_transacoes()
+        labelframe_acoes = ttk.Labelframe(self.root, text="Ações", padding=(10, 10))
+        labelframe_acoes.pack(fill=tk.X, padx=10, pady=(10,5))
+        self.btn_add_ganho = ttk.Button(labelframe_acoes, text="Adicionar Ganho", command=self.abrir_janela_adicionar_ganho)
+        self.btn_add_ganho.pack(side=tk.LEFT, padx=5)
+        self.btn_add_despesa = ttk.Button(labelframe_acoes, text="Adicionar Despesa", command=self.abrir_janela_adicionar_despesa)
+        self.btn_add_despesa.pack(side=tk.LEFT, padx=5)
+        self.btn_editar = ttk.Button(labelframe_acoes, text="Editar Selecionada", command=self.iniciar_edicao_transacao, state=tk.DISABLED)
+        self.btn_editar.pack(side=tk.LEFT, padx=5)
+        self.btn_excluir = ttk.Button(labelframe_acoes, text="Excluir Selecionada", command=self.iniciar_exclusao_transacao, state=tk.DISABLED)
+        self.btn_excluir.pack(side=tk.LEFT, padx=5)
 
-    conn_check, cursor_check = conectar_bd()
-    cursor_check.execute("SELECT COUNT(*) FROM transacoes_tb")
-    count = cursor_check.fetchone()[0]
-    conn_check.close()
-    if count == 0:
-        return
+        labelframe_filtros = ttk.Labelframe(self.root, text="Filtrar por Período", padding=(10,10))
+        labelframe_filtros.pack(fill=tk.X, padx=10, pady=5)
+        ttk.Label(labelframe_filtros, text="Ano:").pack(side=tk.LEFT, padx=(0,5))
+        self.ano_selecionado_var = tk.StringVar()
+        self.combo_ano = ttk.Combobox(labelframe_filtros, textvariable=self.ano_selecionado_var, width=8, state="readonly", style='TCombobox')
+        self.combo_ano.pack(side=tk.LEFT, padx=(0,10))
+        self.combo_ano.bind('<<ComboboxSelected>>', self._on_filtro_periodo_changed)
+        self._popular_combobox_ano()
+        ttk.Label(labelframe_filtros, text="Mês:").pack(side=tk.LEFT, padx=(0,5))
+        self.mes_selecionado_var = tk.StringVar()
+        self.nomes_meses_pt = [""] + [month_name[i].capitalize() for i in range(1,13)]
+        self.combo_mes = ttk.Combobox(labelframe_filtros, textvariable=self.mes_selecionado_var, values=self.nomes_meses_pt[1:], width=12, state="readonly", style='TCombobox')
+        self.combo_mes.pack(side=tk.LEFT, padx=(0,10))
+        self.combo_mes.bind('<<ComboboxSelected>>', self._on_filtro_periodo_changed)
+        self.combo_mes.current(datetime.datetime.now().month - 1)
+        btn_limpar_filtro = ttk.Button(labelframe_filtros, text="Ver Todos/Limpar Filtro", command=self._limpar_filtro_periodo)
+        btn_limpar_filtro.pack(side=tk.LEFT, padx=10)
+        self.filtro_mes_ano_ativo = True
 
-    id_para_editar = None
-    while True:
+        self.labelframe_lista = ttk.Labelframe(self.root, text="Transações Registradas", padding=(10,10))
+        self.labelframe_lista.pack(expand=True, fill=tk.BOTH, padx=10, pady=5)
+        btn_atualizar = ttk.Button(self.labelframe_lista, text="Atualizar Exibição Atual", command=self.atualizar_tudo)
+        btn_atualizar.pack(pady=(0,10))
+        self.cols_info = {'ID': {'index': 0, 'type': 'int', 'width': 50, 'anchor': tk.CENTER}, 'Data': {'index': 1, 'type': 'date', 'width': 100, 'anchor': tk.CENTER}, 'Tipo': {'index': 2, 'type': 'str', 'width': 100}, 'Descrição': {'index': 3, 'type': 'str', 'width': 250}, 'Valor (R$)': {'index': 4, 'type': 'float', 'width': 120, 'anchor': tk.E}, 'Categoria': {'index': 5, 'type': 'str', 'width': 150}}
+        self.tree_transacoes_cols = list(self.cols_info.keys())
+        self.tree_transacoes = ttk.Treeview(self.labelframe_lista, columns=self.tree_transacoes_cols, show='headings', selectmode="browse")
+        self.sort_by_column_states = {}
+        for col_name in self.tree_transacoes_cols:
+            col_data = self.cols_info[col_name]
+            self.tree_transacoes.heading(col_name, text=col_name, command=partial(self._sort_treeview_column, col_name, False))
+            self.tree_transacoes.column(col_name, width=col_data['width'], anchor=col_data.get('anchor', tk.W))
+            self.sort_by_column_states[col_name] = False
+        self.tree_transacoes.pack(expand=True, fill=tk.BOTH, pady=(0,5))
+        scrollbar = ttk.Scrollbar(self.tree_transacoes, orient=tk.VERTICAL, command=self.tree_transacoes.yview, style='Vertical.TScrollbar')
+        self.tree_transacoes.configure(yscroll=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree_transacoes.bind('<<TreeviewSelect>>', self._on_treeview_select)
+        self.tree_transacoes.bind('<Double-1>', self._on_treeview_double_click)
+
+        labelframe_saldos = ttk.Labelframe(self.root, text="Resumo Financeiro do Período", padding=(10,10))
+        labelframe_saldos.pack(fill=tk.X, padx=10, pady=(5,10))
+        saldo_container = ttk.Frame(labelframe_saldos) 
+        saldo_container.pack(pady=5)
+        self.lbl_total_ganhos_texto = ttk.Label(saldo_container, text="Total de Ganhos: ", style="Bold.TLabel")
+        self.lbl_total_ganhos_texto.grid(row=0, column=0, sticky=tk.E, padx=5)
+        self.lbl_total_ganhos_valor = ttk.Label(saldo_container, text="R$ 0.00")
+        self.lbl_total_ganhos_valor.grid(row=0, column=1, sticky=tk.W, padx=5)
+        self.lbl_total_despesas_texto = ttk.Label(saldo_container, text="Total de Despesas: ", style="Bold.TLabel")
+        self.lbl_total_despesas_texto.grid(row=1, column=0, sticky=tk.E, padx=5, pady=2)
+        self.lbl_total_despesas_valor = ttk.Label(saldo_container, text="R$ 0.00")
+        self.lbl_total_despesas_valor.grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
+        self.lbl_saldo_liquido_texto = ttk.Label(saldo_container, text="Saldo Líquido: ", style="Bold.TLabel")
+        self.lbl_saldo_liquido_texto.grid(row=2, column=0, sticky=tk.E, padx=5, pady=2)
+        self.lbl_saldo_liquido_valor = ttk.Label(saldo_container, text="R$ 0.00")
+        self.lbl_saldo_liquido_valor.grid(row=2, column=1, sticky=tk.W, padx=5, pady=2)
+
+        self.status_bar_var = tk.StringVar()
+        self.status_bar = ttk.Label(self.root, textvariable=self.status_bar_var, style="Status.TLabel", anchor=tk.W)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0,5))
+        self._status_bar_job = None
+        self.atualizar_tudo()
+
+    def _popular_combobox_ano(self):
         try:
-            id_str = input("Digite o ID da transação que deseja editar (ou 0 para cancelar): ")
-            id_para_editar = int(id_str)
-            if id_para_editar == 0:
-                print("Edição cancelada.")
-                return
-            break
-        except ValueError:
-            print("ID inválido. Por favor, insira um número.")
+            anos_db = buscar_anos_disponiveis_db()
+            ano_atual_str = str(datetime.datetime.now().year)
+            if ano_atual_str not in anos_db: anos_db.append(ano_atual_str)
+            anos_db.sort(key=int, reverse=True)
+            self.combo_ano['values'] = anos_db
+            if anos_db: self.ano_selecionado_var.set(ano_atual_str if ano_atual_str in anos_db else anos_db[0])
+            else: self.ano_selecionado_var.set(ano_atual_str)
+        except Exception as e:
+            self.mostrar_mensagem_status(f"Erro ao popular anos: {e}", tipo='erro')
+            self.ano_selecionado_var.set(str(datetime.datetime.now().year))
+            self.combo_ano['values'] = [str(datetime.datetime.now().year)]
 
-    transacao_atual = _buscar_transacao_por_id(id_para_editar)
+    def _on_filtro_periodo_changed(self, event=None):
+        ano_val = self.ano_selecionado_var.get()
+        mes_val = self.mes_selecionado_var.get()
+        if ano_val and mes_val:
+            self.filtro_mes_ano_ativo = True
+            self.atualizar_tudo()
 
-    if not transacao_atual:
-        print(f"Transação com ID {id_para_editar} não encontrada.")
-        return
+    def _limpar_filtro_periodo(self):
+        self.filtro_mes_ano_ativo = False
+        self.atualizar_tudo()
 
-    print("\nDados atuais da transação:")
-    _exibir_lista_formatada([transacao_atual], f"Detalhes da Transação ID {id_para_editar}")
+    def _configurar_janela_top_level_dark_mode(self, janela_top_level, form_title="Formulário"):
+        janela_top_level.configure(bg=self.cor_fundo_principal)
+        main_form_labelframe = ttk.Labelframe(janela_top_level, text=form_title, padding=(15,10))
+        main_form_labelframe.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
+        return main_form_labelframe
+    
+    def _centralizar_janela_toplevel(self, janela_top):
+        janela_top.update_idletasks()
+        width = janela_top.winfo_width(); height = janela_top.winfo_height()
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (width // 2)
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (height // 2)
+        janela_top.geometry(f'{width}x{height}+{x}+{y}')
 
-    print("\nDigite os novos valores. Pressione Enter para manter o valor atual.")
-    nova_descricao_str = input(f"Nova descrição [{transacao_atual['descricao']}]: ")
-    nova_descricao = nova_descricao_str if nova_descricao_str else transacao_atual['descricao']
+    def mostrar_mensagem_status(self, mensagem, duracao_ms=4000, tipo='info'):
+        if self._status_bar_job: self.root.after_cancel(self._status_bar_job)
+        cor_map = {'sucesso': "#77dd77", 'erro': "#ff6961", 'info': self.cor_texto_secundario}
+        self.status_bar_var.set(mensagem)
+        self.status_bar.config(foreground=cor_map.get(tipo, self.cor_texto_principal))
+        self._status_bar_job = self.root.after(duracao_ms, self._limpar_mensagem_status)
 
-    novo_valor = transacao_atual['valor']
-    while True:
+    def _limpar_mensagem_status(self): self.status_bar_var.set(""); self._status_bar_job = None
+
+    def _converter_valor_para_ordenacao(self, valor_str, tipo_coluna):
+        if valor_str is None or valor_str == "-": return "" if tipo_coluna == 'str' else (datetime.datetime.min if tipo_coluna == 'date' else 0)
+        if tipo_coluna == 'int': return int(valor_str)
+        elif tipo_coluna == 'float':
+            try: return float(str(valor_str).replace('R$', '').replace('.', '',100).replace(',', '.').strip())
+            except ValueError: return 0.0
+        elif tipo_coluna == 'date':
+            try: return datetime.datetime.strptime(valor_str, '%d/%m/%Y')
+            except ValueError: return datetime.datetime.min 
+        return str(valor_str).lower() 
+
+    def _sort_treeview_column(self, col_name, reverse):
+        col_type = self.cols_info[col_name]['type']
         try:
-            novo_valor_str = input(f"Novo valor [{transacao_atual['valor']:.2f}]: ")
-            if not novo_valor_str:
-                break
-            novo_valor_temp = float(novo_valor_str.replace(',', '.'))
-            if novo_valor_temp <= 0:
-                print("O valor da transação deve ser positivo. Tente novamente.")
-            else:
-                novo_valor = novo_valor_temp
-                break
-        except ValueError:
-            print("Valor inválido. Por favor, insira um número.")
+            data_list = [(self._converter_valor_para_ordenacao(self.tree_transacoes.set(item_id, col_name), col_type), item_id)
+                         for item_id in self.tree_transacoes.get_children('')]
+        except Exception as e: self.mostrar_mensagem_status(f"Erro ao ordenar: {e}", tipo='erro'); return
+        data_list.sort(key=lambda x: x[0], reverse=reverse)
+        for i, (val, item_id) in enumerate(data_list): self.tree_transacoes.move(item_id, '', i)
+        for c in self.tree_transacoes_cols:
+             current_text = c
+             if c == col_name: current_text += ' ▼' if reverse else ' ▲'
+             self.tree_transacoes.heading(c, text=current_text, command=partial(self._sort_treeview_column, c, (not reverse if c == col_name else self.sort_by_column_states.get(c, False) )))
+        self.sort_by_column_states[col_name] = reverse
 
-    nova_categoria = transacao_atual['categoria']
-    if transacao_atual['tipo'] == 'despesa':
-        nova_categoria_str = input(f"Nova categoria [{transacao_atual['categoria'] or ''}]: ")
-        nova_categoria = nova_categoria_str if nova_categoria_str else transacao_atual['categoria']
-        if not nova_categoria:
-             nova_categoria_input = input("Categoria não pode ser vazia para despesa. Digite a categoria (ou Enter para manter a original, se houver): ")
-             nova_categoria = nova_categoria_input if nova_categoria_input else transacao_atual['categoria']
-             if not nova_categoria: # Ainda vazia, força algo ou cancela
-                 print("Despesa deve ter uma categoria. Edição da categoria cancelada ou definir padrão.")
-                 # Poderia forçar um default: nova_categoria = "Outros" ou simplesmente manter a original se existir
-                 nova_categoria = transacao_atual['categoria'] if transacao_atual['categoria'] else "Outros"
+    def _on_treeview_select(self, event):
+        state = tk.NORMAL if self.tree_transacoes.selection() else tk.DISABLED
+        self.btn_editar.config(state=state)
+        self.btn_excluir.config(state=state)
 
+    def _on_treeview_double_click(self, event):
+        if self.tree_transacoes.selection(): self.iniciar_edicao_transacao()
 
-    print("\n--- Revisão das Alterações ---")
-    print(f"Descrição: de '{transacao_atual['descricao']}' para '{nova_descricao}'")
-    print(f"Valor: de R$ {transacao_atual['valor']:.2f} para R$ {novo_valor:.2f}")
-    if transacao_atual['tipo'] == 'despesa':
-        print(f"Categoria: de '{transacao_atual['categoria'] or '-'}' para '{nova_categoria or '-'}'")
+    def formatar_data_para_exibicao(self, data_iso):
+        if not data_iso: return ""
+        if isinstance(data_iso, str):
+            try: data_obj = datetime.datetime.fromisoformat(data_iso)
+            except ValueError: return data_iso 
+        else: data_obj = data_iso
+        return data_obj.strftime('%d/%m/%Y')
 
-    confirmar = input("\nDeseja salvar estas alterações? (s/n): ").strip().lower()
-    if confirmar == 's':
-        conn, cursor = conectar_bd()
+    def atualizar_lista_transacoes(self):
+        for i in self.tree_transacoes.get_children(): self.tree_transacoes.delete(i)
+        
+        ano_f, mes_f, titulo_lista = None, None, "Todas as Transações Registradas"
+        
+        if self.filtro_mes_ano_ativo:
+            ano_str = self.ano_selecionado_var.get()
+            mes_nome = self.mes_selecionado_var.get()
+            try:
+                if ano_str: ano_f = int(ano_str)
+                if mes_nome and mes_nome in self.nomes_meses_pt: mes_f = self.nomes_meses_pt.index(mes_nome)
+                if ano_f and mes_f: titulo_lista = f"Transações de {mes_nome}/{ano_f}"
+                elif ano_f: titulo_lista = f"Transações de Todo o Ano de {ano_f}"
+                elif mes_f: titulo_lista = f"Transações de {mes_nome} (Todos os Anos)"
+            except (ValueError, IndexError):
+                 self.mostrar_mensagem_status("Seleção de Ano/Mês inválida.", tipo='erro')
+                 ano_f, mes_f, self.filtro_mes_ano_ativo = None, None, False
+        
+        self.labelframe_lista.config(text=titulo_lista)
         try:
-            cursor.execute('''
-                UPDATE transacoes_tb
-                SET descricao = ?, valor = ?, categoria = ?
-                WHERE id = ?
-            ''', (nova_descricao, novo_valor, nova_categoria, id_para_editar))
-            conn.commit()
-            print("Transação atualizada com sucesso!")
-        except sqlite3.Error as e:
-            print(f"Erro ao atualizar transação: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
-    else:
-        print("Alterações descartadas.")
+            transacoes = buscar_transacoes_db(ano=ano_f, mes=mes_f)
+            if transacoes:
+                for transacao in transacoes:
+                    self.tree_transacoes.insert('', tk.END, values=(
+                        transacao['id'], self.formatar_data_para_exibicao(transacao['data_registro']),
+                        transacao['tipo'].capitalize(), transacao['descricao'],
+                        f"{transacao['valor']:.2f}", transacao['categoria'] if transacao['categoria'] is not None else "-"
+                    ))
+            for col_name in self.tree_transacoes_cols:
+                 self.tree_transacoes.heading(col_name, text=col_name, command=partial(self._sort_treeview_column, col_name, False))
+                 self.sort_by_column_states[col_name] = False
+        except Exception as e: self.mostrar_mensagem_status(f"Erro ao buscar transações: {e}", tipo='erro')
 
-def excluir_transacao():
-    """Permite ao usuário excluir uma transação existente."""
-    print("\n--- Excluir Transação ---")
-    listar_transacoes() # Mostra as transações para o usuário escolher o ID
-
-    conn_check, cursor_check = conectar_bd()
-    cursor_check.execute("SELECT COUNT(*) FROM transacoes_tb")
-    count = cursor_check.fetchone()[0]
-    conn_check.close()
-    if count == 0:
-        # listar_transacoes já informa, mas podemos retornar aqui.
-        return
-
-    id_para_excluir = None
-    while True:
+    def atualizar_exibicao_saldo(self):
+        ano_f, mes_f = None, None
+        if self.filtro_mes_ano_ativo:
+            ano_str = self.ano_selecionado_var.get()
+            mes_nome = self.mes_selecionado_var.get()
+            try:
+                if ano_str: ano_f = int(ano_str)
+                if mes_nome and mes_nome in self.nomes_meses_pt: mes_f = self.nomes_meses_pt.index(mes_nome)
+            except (ValueError, IndexError):
+                ano_f, mes_f = None, None
         try:
-            id_str = input("Digite o ID da transação que deseja excluir (ou 0 para cancelar): ")
-            id_para_excluir = int(id_str)
-            if id_para_excluir == 0:
-                print("Exclusão cancelada.")
-                return
-            break
-        except ValueError:
-            print("ID inválido. Por favor, insira um número.")
+            total_ganhos, total_despesas, saldo_liquido = calcular_saldo_db(ano=ano_f, mes=mes_f)
+            self.lbl_total_ganhos_valor.config(text=f"R$ {total_ganhos:.2f}")
+            self.lbl_total_despesas_valor.config(text=f"R$ {total_despesas:.2f}")
+            cor_saldo_texto = "#77dd77" if saldo_liquido >= 0 else "#ff6961"
+            self.lbl_saldo_liquido_valor.config(text=f"R$ {saldo_liquido:.2f}", foreground=cor_saldo_texto)
+        except Exception as e: self.mostrar_mensagem_status(f"Erro ao calcular saldo: {e}", tipo='erro')
 
-    transacao_a_excluir = _buscar_transacao_por_id(id_para_excluir)
+    def atualizar_tudo(self):
+        self.atualizar_lista_transacoes()
+        self.atualizar_exibicao_saldo()
+        self._on_treeview_select(None)
 
-    if not transacao_a_excluir:
-        print(f"Transação com ID {id_para_excluir} não encontrada.")
-        return
-
-    print("\nVocê está prestes a excluir a seguinte transação:")
-    _exibir_lista_formatada([transacao_a_excluir], f"Detalhes da Transação ID {id_para_excluir}")
-
-    confirmar = input("Tem certeza que deseja excluir esta transação? (s/n): ").strip().lower()
-
-    if confirmar == 's':
-        conn, cursor = conectar_bd()
+    # (Os métodos para adicionar, editar e excluir permanecem aqui, inalterados da versão anterior)
+    def _salvar_novo_ganho(self, janela_adicionar, entry_descricao, entry_valor):
+        descricao = entry_descricao.get().strip()
+        valor_str = entry_valor.get().strip().replace(',', '.')
+        if not descricao: messagebox.showerror("Erro de Validação", "Descrição: * não pode ser vazia.", parent=janela_adicionar); return
+        if not valor_str: messagebox.showerror("Erro de Validação", "Valor (R$): * não pode ser vazio.", parent=janela_adicionar); return
         try:
-            cursor.execute("DELETE FROM transacoes_tb WHERE id = ?", (id_para_excluir,))
-            conn.commit()
-            # Verifica se alguma linha foi realmente afetada/deletada
-            if cursor.rowcount > 0:
-                print("Transação excluída com sucesso!")
-            else:
-                # Isso não deveria acontecer se _buscar_transacao_por_id encontrou algo, mas é uma checagem extra
-                print(f"Nenhuma transação encontrada com o ID {id_para_excluir} para excluir (pode já ter sido removida).")
+            valor = float(valor_str)
+            if valor <= 0: messagebox.showerror("Erro de Validação", "Valor deve ser positivo.", parent=janela_adicionar); return
+        except ValueError: messagebox.showerror("Erro de Validação", "Valor inválido.", parent=janela_adicionar); return
+        try:
+            if adicionar_ganho_db(descricao, valor):
+                self.mostrar_mensagem_status("Ganho adicionado com sucesso!", tipo='sucesso')
+                janela_adicionar.destroy(); self.atualizar_tudo()
+        except Exception as e: messagebox.showerror("Erro ao Salvar", f"Não foi possível salvar o ganho: {e}", parent=janela_adicionar)
 
-        except sqlite3.Error as e:
-            print(f"Erro ao excluir transação: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
-    else:
-        print("Exclusão cancelada pelo usuário.")
+    def abrir_janela_adicionar_ganho(self):
+        janela_ganho = tk.Toplevel(self.root)
+        janela_ganho.title("Adicionar Novo Ganho")
+        janela_ganho.geometry("400x180") 
+        janela_ganho.resizable(False, False); janela_ganho.transient(self.root); janela_ganho.grab_set()
+        form_labelframe = self._configurar_janela_top_level_dark_mode(janela_ganho, "Detalhes do Ganho")
+        lbl_descricao = ttk.Label(form_labelframe, text="Descrição: *", style="Required.TLabel")
+        lbl_descricao.grid(row=0, column=0, padx=5, pady=8, sticky=tk.W)
+        entry_descricao = ttk.Entry(form_labelframe, width=35, style='TEntry')
+        entry_descricao.grid(row=0, column=1, padx=5, pady=8, sticky=tk.EW)
+        entry_descricao.focus()
+        lbl_valor = ttk.Label(form_labelframe, text="Valor (R$): *", style="Required.TLabel")
+        lbl_valor.grid(row=1, column=0, padx=5, pady=8, sticky=tk.W)
+        entry_valor = ttk.Entry(form_labelframe, width=20, style='TEntry')
+        entry_valor.grid(row=1, column=1, padx=5, pady=8, sticky=tk.W)
+        frame_botoes = ttk.Frame(form_labelframe) 
+        frame_botoes.grid(row=2, column=0, columnspan=2, pady=(15,5))
+        btn_salvar = ttk.Button(frame_botoes, text="Salvar", style='TButton', command=lambda: self._salvar_novo_ganho(janela_ganho, entry_descricao, entry_valor))
+        btn_salvar.pack(side=tk.LEFT, padx=10)
+        janela_ganho.bind("<Return>", lambda e: self._salvar_novo_ganho(janela_ganho, entry_descricao, entry_valor))
+        btn_cancelar = ttk.Button(frame_botoes, text="Cancelar", style='TButton', command=janela_ganho.destroy)
+        btn_cancelar.pack(side=tk.LEFT, padx=10)
+        self._centralizar_janela_toplevel(janela_ganho)
+
+    def _salvar_nova_despesa(self, janela_adicionar, entry_descricao, entry_valor_principal, entry_categoria, var_parcelado, entry_num_parcelas, entry_valor_parcela, entry_data_primeira_parcela):
+        descricao_base = entry_descricao.get().strip()
+        categoria = entry_categoria.get().strip()
+        if not descricao_base: messagebox.showerror("Erro de Validação", "Descrição: * não pode ser vazia.", parent=janela_adicionar); return
+        if not categoria: messagebox.showerror("Erro de Validação", "Categoria: * não pode ser vazia.", parent=janela_adicionar); return
+        is_parcelado = var_parcelado.get()
+        if is_parcelado:
+            valor_parcela_str = entry_valor_parcela.get().strip().replace(',', '.')
+            num_parcelas_str = entry_num_parcelas.get().strip()
+            data_primeira_str = entry_data_primeira_parcela.get().strip()
+            if not valor_parcela_str: messagebox.showerror("Erro de Validação", "Valor da Parcela: * não pode ser vazio.", parent=janela_adicionar); return
+            if not num_parcelas_str: messagebox.showerror("Erro de Validação", "No. de Parcelas: * não pode ser vazio.", parent=janela_adicionar); return
+            if not data_primeira_str: messagebox.showerror("Erro de Validação", "Data da 1ª Parcela: * não pode ser vazia (DD/MM/AAAA).", parent=janela_adicionar); return
+            try:
+                valor_da_parcela = float(valor_parcela_str)
+                if valor_da_parcela <= 0: messagebox.showerror("Erro de Validação", "Valor da parcela deve ser positivo.", parent=janela_adicionar); return
+            except ValueError: messagebox.showerror("Erro de Validação", "Valor da parcela inválido.", parent=janela_adicionar); return
+            try:
+                total_parcelas = int(num_parcelas_str)
+                if total_parcelas <= 1 : messagebox.showerror("Erro de Validação", "No. de parcelas deve ser maior que 1.", parent=janela_adicionar); return
+            except ValueError: messagebox.showerror("Erro de Validação", "No. de parcelas inválido.", parent=janela_adicionar); return
+            try:
+                data_primeira_obj = datetime.datetime.strptime(data_primeira_str, "%d/%m/%Y")
+            except ValueError: messagebox.showerror("Erro de Validação", "Formato da Data da 1ª Parcela inválido. Use DD/MM/AAAA.", parent=janela_adicionar); return
+            sucesso_total = True
+            for i in range(total_parcelas):
+                descricao_parcela = f"{descricao_base} (Parcela {i+1}/{total_parcelas})"
+                current_month = data_primeira_obj.month + i
+                current_year = data_primeira_obj.year + (current_month - 1) // 12
+                current_month = (current_month - 1) % 12 + 1
+                day_of_installment = data_primeira_obj.day
+                _, last_day_of_target_month = monthrange(current_year, current_month)
+                if day_of_installment > last_day_of_target_month: day_of_installment = last_day_of_target_month
+                data_parcela_obj = datetime.datetime(current_year, current_month, day_of_installment)
+                data_parcela_iso = data_parcela_obj.isoformat()
+                try:
+                    if not adicionar_despesa_db(descricao_parcela, valor_da_parcela, categoria, data_parcela_iso):
+                        sucesso_total = False; break 
+                except Exception as e:
+                    messagebox.showerror("Erro ao Salvar Parcela", f"Não foi possível salvar a parcela {i+1}: {e}", parent=janela_adicionar)
+                    sucesso_total = False; break
+            if sucesso_total:
+                self.mostrar_mensagem_status(f"{total_parcelas} parcelas adicionadas com sucesso!", tipo='sucesso')
+                janela_adicionar.destroy(); self.atualizar_tudo()
+        else: 
+            valor_principal_str = entry_valor_principal.get().strip().replace(',', '.')
+            if not valor_principal_str: messagebox.showerror("Erro de Validação", "Valor (R$): * não pode ser vazio.", parent=janela_adicionar); return
+            try:
+                valor = float(valor_principal_str)
+                if valor <= 0: messagebox.showerror("Erro de Validação", "Valor da despesa deve ser positivo.", parent=janela_adicionar); return
+            except ValueError: messagebox.showerror("Erro de Validação", "Valor inválido.", parent=janela_adicionar); return
+            try:
+                if adicionar_despesa_db(descricao_base, valor, categoria):
+                    self.mostrar_mensagem_status("Despesa adicionada com sucesso!", tipo='sucesso')
+                    janela_adicionar.destroy(); self.atualizar_tudo()
+            except Exception as e: messagebox.showerror("Erro ao Salvar", f"Não foi possível salvar a despesa: {e}", parent=janela_adicionar)
+
+    def abrir_janela_adicionar_despesa(self):
+        janela_despesa = tk.Toplevel(self.root)
+        janela_despesa.title("Adicionar Nova Despesa")
+        janela_despesa.resizable(False, False); janela_despesa.transient(self.root); janela_despesa.grab_set()
+        form_labelframe = self._configurar_janela_top_level_dark_mode(janela_despesa, "Detalhes da Despesa")
+        row_idx = 0
+        lbl_descricao = ttk.Label(form_labelframe, text="Descrição: *", style="Required.TLabel")
+        lbl_descricao.grid(row=row_idx, column=0, padx=5, pady=8, sticky=tk.W)
+        entry_descricao = ttk.Entry(form_labelframe, width=35, style='TEntry')
+        entry_descricao.grid(row=row_idx, column=1, padx=5, pady=8, sticky=tk.EW)
+        entry_descricao.focus()
+        row_idx+=1
+        lbl_valor_principal = ttk.Label(form_labelframe, text="Valor (R$): *", style="Required.TLabel")
+        lbl_valor_principal.grid(row=row_idx, column=0, padx=5, pady=8, sticky=tk.W)
+        entry_valor_principal = ttk.Entry(form_labelframe, width=20, style='TEntry')
+        entry_valor_principal.grid(row=row_idx, column=1, padx=5, pady=8, sticky=tk.W)
+        row_idx+=1
+        lbl_categoria = ttk.Label(form_labelframe, text="Categoria: *", style="Required.TLabel")
+        lbl_categoria.grid(row=row_idx, column=0, padx=5, pady=8, sticky=tk.W)
+        entry_categoria = ttk.Entry(form_labelframe, width=35, style='TEntry')
+        entry_categoria.grid(row=row_idx, column=1, padx=5, pady=8, sticky=tk.EW)
+        row_idx+=1
+        var_parcelado = tk.BooleanVar()
+        chk_parcelado = ttk.Checkbutton(form_labelframe, text="Compra Parcelada?", variable=var_parcelado, style='TCheckbutton')
+        chk_parcelado.grid(row=row_idx, column=0, columnspan=2, padx=5, pady=10, sticky=tk.W)
+        row_idx+=1
+        lbl_num_parcelas = ttk.Label(form_labelframe, text="No. de Parcelas: *", style="Required.TLabel")
+        entry_num_parcelas = ttk.Entry(form_labelframe, width=10, style='TEntry')
+        lbl_valor_parcela = ttk.Label(form_labelframe, text="Valor da Parcela: *", style="Required.TLabel")
+        entry_valor_parcela = ttk.Entry(form_labelframe, width=20, style='TEntry')
+        lbl_data_primeira_parcela = ttk.Label(form_labelframe, text="Data da 1ª Parcela (DD/MM/AAAA): *", style="Required.TLabel")
+        entry_data_primeira_parcela = ttk.Entry(form_labelframe, width=20, style='TEntry')
+        entry_data_primeira_parcela.insert(0, datetime.date.today().strftime("%d/%m/%Y"))
+        lbl_num_parcelas.grid(row=row_idx, column=0, padx=5, pady=8, sticky=tk.W)
+        entry_num_parcelas.grid(row=row_idx, column=1, padx=5, pady=8, sticky=tk.W)
+        row_idx+=1
+        lbl_valor_parcela.grid(row=row_idx, column=0, padx=5, pady=8, sticky=tk.W)
+        entry_valor_parcela.grid(row=row_idx, column=1, padx=5, pady=8, sticky=tk.W)
+        row_idx+=1
+        lbl_data_primeira_parcela.grid(row=row_idx, column=0, padx=5, pady=8, sticky=tk.W)
+        entry_data_primeira_parcela.grid(row=row_idx, column=1, padx=5, pady=8, sticky=tk.W)
+        row_idx+=1
+        chk_parcelado.config(command=lambda: self._toggle_campos_parcela(var_parcelado, lbl_num_parcelas, entry_num_parcelas, lbl_valor_parcela, entry_valor_parcela, lbl_valor_principal, entry_valor_principal, lbl_data_primeira_parcela, entry_data_primeira_parcela))
+        self._toggle_campos_parcela(var_parcelado, lbl_num_parcelas, entry_num_parcelas, lbl_valor_parcela, entry_valor_parcela, lbl_valor_principal, entry_valor_principal, lbl_data_primeira_parcela, entry_data_primeira_parcela)
+        frame_botoes = ttk.Frame(form_labelframe)
+        frame_botoes.grid(row=row_idx, column=0, columnspan=2, pady=(15,5))
+        btn_salvar = ttk.Button(frame_botoes, text="Salvar", style='TButton', command=lambda: self._salvar_nova_despesa(janela_despesa, entry_descricao, entry_valor_principal, entry_categoria, var_parcelado, entry_num_parcelas, entry_valor_parcela, entry_data_primeira_parcela))
+        btn_salvar.pack(side=tk.LEFT, padx=10)
+        janela_despesa.bind("<Return>", lambda e: self._salvar_nova_despesa(janela_despesa, entry_descricao, entry_valor_principal, entry_categoria, var_parcelado, entry_num_parcelas, entry_valor_parcela, entry_data_primeira_parcela))
+        btn_cancelar = ttk.Button(frame_botoes, text="Cancelar", style='TButton', command=janela_despesa.destroy)
+        btn_cancelar.pack(side=tk.LEFT, padx=10)
+        janela_despesa.update_idletasks() 
+        if not var_parcelado.get(): janela_despesa.geometry("400x260")
+        else: janela_despesa.geometry("450x400") 
+        self._centralizar_janela_toplevel(janela_despesa)
+
+    def _salvar_edicao_transacao(self, janela_editar, id_transacao, entry_descricao, entry_valor, entry_categoria_widget, tipo_original):
+        # ... (código inalterado)
+        nova_descricao = entry_descricao.get().strip()
+        novo_valor_str = entry_valor.get().strip().replace(',', '.')
+        nova_categoria = None
+        if tipo_original == 'despesa' and entry_categoria_widget: nova_categoria = entry_categoria_widget.get().strip()
+        if not nova_descricao: messagebox.showerror("Erro de Validação", "Descrição: * não pode ser vazia.", parent=janela_editar); return
+        if not novo_valor_str: messagebox.showerror("Erro de Validação", "Valor (R$): * não pode ser vazio.", parent=janela_editar); return
+        if tipo_original == 'despesa' and not nova_categoria: messagebox.showerror("Erro de Validação", "Categoria: * não pode ser vazia.", parent=janela_editar); return
+        try:
+            novo_valor = float(novo_valor_str)
+            if novo_valor <= 0: messagebox.showerror("Erro de Validação", "Valor deve ser positivo.", parent=janela_editar); return
+        except ValueError: messagebox.showerror("Erro de Validação", "Valor inválido.", parent=janela_editar); return
+        try:
+            if editar_transacao_db(id_transacao, nova_descricao, novo_valor, nova_categoria):
+                self.mostrar_mensagem_status("Transação atualizada com sucesso!", tipo='sucesso')
+                janela_editar.destroy(); self.atualizar_tudo()
+        except Exception as e: messagebox.showerror("Erro ao Editar", f"Não foi possível editar: {e}", parent=janela_editar)
 
 
-def mostrar_menu():
-    print("\n--- Controle Financeiro Pessoal ---")
-    print("Escolha uma opção:")
-    print("1. Adicionar Ganho")
-    print("2. Adicionar Despesa")
-    print("3. Ver Saldo")
-    print("4. Listar Todas as Transações")
-    print("5. Filtrar Transações")
-    print("6. Editar Transação")
-    print("7. Excluir Transação") # Nova opção
-    print("0. Sair")
+    def abrir_janela_editar_transacao(self, id_transacao):
+        # ... (código inalterado)
+        try: transacao_atual = _buscar_transacao_por_id_db(id_transacao)
+        except Exception as e: messagebox.showerror("Erro", f"Erro ao buscar transação: {e}"); return
+        if not transacao_atual: messagebox.showerror("Erro", "Transação não encontrada."); return
+        janela_editar = tk.Toplevel(self.root)
+        janela_editar.title(f"Editar Transação ID: {id_transacao}")
+        janela_editar.geometry("450x280" if transacao_atual['tipo'] == 'ganho' else "450x320") 
+        janela_editar.resizable(False, False); janela_editar.transient(self.root); janela_editar.grab_set()
+        form_labelframe = self._configurar_janela_top_level_dark_mode(janela_editar, f"Editando Transação {id_transacao}")
+        row_idx = 0
+        ttk.Label(form_labelframe, text="Tipo:", style='TLabel').grid(row=row_idx, column=0, padx=5, pady=8, sticky=tk.W)
+        ttk.Label(form_labelframe, text=transacao_atual['tipo'].capitalize(), style='TLabel').grid(row=row_idx, column=1, padx=5, pady=8, sticky=tk.W)
+        row_idx += 1
+        lbl_descricao = ttk.Label(form_labelframe, text="Descrição: *", style="Required.TLabel")
+        lbl_descricao.grid(row=row_idx, column=0, padx=5, pady=8, sticky=tk.W)
+        entry_descricao = ttk.Entry(form_labelframe, width=35, style='TEntry')
+        entry_descricao.grid(row=row_idx, column=1, padx=5, pady=8, sticky=tk.EW)
+        entry_descricao.insert(0, transacao_atual['descricao']); entry_descricao.focus()
+        row_idx += 1
+        lbl_valor = ttk.Label(form_labelframe, text="Valor (R$): *", style="Required.TLabel")
+        lbl_valor.grid(row=row_idx, column=0, padx=5, pady=8, sticky=tk.W)
+        entry_valor = ttk.Entry(form_labelframe, width=20, style='TEntry')
+        entry_valor.grid(row=row_idx, column=1, padx=5, pady=8, sticky=tk.W)
+        entry_valor.insert(0, f"{transacao_atual['valor']:.2f}")
+        row_idx += 1
+        entry_categoria_widget = None 
+        if transacao_atual['tipo'] == 'despesa':
+            lbl_categoria = ttk.Label(form_labelframe, text="Categoria: *", style="Required.TLabel")
+            lbl_categoria.grid(row=row_idx, column=0, padx=5, pady=8, sticky=tk.W)
+            entry_categoria_widget = ttk.Entry(form_labelframe, width=35, style='TEntry')
+            entry_categoria_widget.grid(row=row_idx, column=1, padx=5, pady=8, sticky=tk.EW)
+            entry_categoria_widget.insert(0, transacao_atual['categoria'] or "")
+            row_idx += 1
+        frame_botoes = ttk.Frame(form_labelframe)
+        frame_botoes.grid(row=row_idx, column=0, columnspan=2, pady=(15,5))
+        btn_salvar = ttk.Button(frame_botoes, text="Salvar Alterações", style='TButton', command=lambda: self._salvar_edicao_transacao(janela_editar, id_transacao, entry_descricao, entry_valor, entry_categoria_widget, transacao_atual['tipo']))
+        btn_salvar.pack(side=tk.LEFT, padx=10)
+        janela_editar.bind("<Return>", lambda e: self._salvar_edicao_transacao(janela_editar, id_transacao, entry_descricao, entry_valor, entry_categoria_widget, transacao_atual['tipo']))
+        btn_cancelar = ttk.Button(frame_botoes, text="Cancelar", style='TButton', command=janela_editar.destroy)
+        btn_cancelar.pack(side=tk.LEFT, padx=10)
+        self._centralizar_janela_toplevel(janela_editar)
 
-    while True:
-        escolha = input("Digite sua opção: ")
-        if escolha == '1':
-            adicionar_ganho()
-            return True
-        elif escolha == '2':
-            adicionar_despesa()
-            return True
-        elif escolha == '3':
-            ver_saldo()
-            return True
-        elif escolha == '4':
-            listar_transacoes()
-            return True
-        elif escolha == '5':
-            filtrar_transacoes()
-            return True
-        elif escolha == '6':
-            editar_transacao()
-            return True
-        elif escolha == '7': # Nova opção
-            excluir_transacao()
-            return True
-        elif escolha == '0':
-            print("Obrigado por usar o Controle Financeiro. Até logo!")
-            return False
-        else:
-            print("Opção inválida. Por favor, tente novamente.")
+    def iniciar_edicao_transacao(self):
+        # ... (código inalterado)
+        selecionado = self.tree_transacoes.selection()
+        if not selecionado: messagebox.showwarning("Nenhuma Seleção", "Selecione uma transação para editar.", parent=self.root); return
+        try:
+            id_transacao = self.tree_transacoes.item(selecionado[0], 'values')[0]
+            self.abrir_janela_editar_transacao(int(id_transacao))
+        except (IndexError, TypeError): messagebox.showerror("Erro", "Não foi possível obter dados da seleção.", parent=self.root)
 
-def main():
+    def iniciar_exclusao_transacao(self):
+        # ... (código inalterado)
+        selecionado = self.tree_transacoes.selection()
+        if not selecionado: messagebox.showwarning("Nenhuma Seleção", "Selecione uma transação para excluir.", parent=self.root); return
+        try:
+            valores = self.tree_transacoes.item(selecionado[0], 'values')
+            id_t, desc_t, val_t = int(valores[0]), valores[3], valores[4]
+            confirmar = messagebox.askyesno("Confirmar Exclusão", f"Excluir: ID {id_t}, {desc_t}, R$ {val_t}?", icon='warning', parent=self.root)
+            if confirmar:
+                try:
+                    if excluir_transacao_db(id_t):
+                        self.mostrar_mensagem_status("Transação excluída!", tipo='sucesso'); self.atualizar_tudo()
+                    else: self.mostrar_mensagem_status(f"ID {id_t} não encontrado para exclusão.", tipo='info')
+                except Exception as e: messagebox.showerror("Erro ao Excluir", f"Não foi possível excluir: {e}", parent=self.root)
+        except (IndexError, TypeError): messagebox.showerror("Erro", "Não foi possível obter dados da seleção.", parent=self.root)
+
+
+if __name__ == '__main__':
     inicializar_banco_de_dados()
-    print("Bem-vindo ao seu Controle Financeiro Pessoal!")
-    print(f"Usando banco de dados: {NOME_BANCO_DADOS}")
-
-    while mostrar_menu():
-        input("\nPressione Enter para continuar...")
-
-if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = AppControleFinanceiro(root)
+    root.mainloop()
